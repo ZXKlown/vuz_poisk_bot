@@ -160,7 +160,6 @@ async def process_confirmation(callback: CallbackQuery, callback_data: Confirmat
         await callback.answer()
         return
 
-    # Сохраняем выбор пользователя
     user_data[callback.from_user.id] = {"city": city_name, "spec": specialization_name, "index": 0}
     await send_university_info(callback, callback.from_user.id)
     await callback.answer()
