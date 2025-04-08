@@ -53,8 +53,9 @@ markup = builder.adjust(7).as_markup()
 # Обработчик команды /start
 @router.message(CommandStart())
 async def process_start_command(message: Message):
+    name = message.from_user.first_name
     await message.answer(
-        text="Выбери первую букву своего города!",
+        text=f"Привет, {name} 👋\nВыбери первую букву своего города:",
         reply_markup=markup
     )
 
@@ -121,25 +122,14 @@ async def process_specialization_selection(callback: CallbackQuery, callback_dat
     specialization_id = callback_data.specialization_id
     specialization = city_specializations[city_name][specialization_id][0]
 
-    builder = InlineKeyboardBuilder()
-    builder.add(
-        InlineKeyboardButton(
-            text="✅ Да",
-            callback_data=ConfirmationCallbackFactory(city_name=city_name, specialization_name=specialization,
-                                                      confirmed=True).pack()
-        ),
-        InlineKeyboardButton(
-            text="🔙 Вернуться в начало",
-            callback_data="go_back_to_start"  # Уникальный callback для возврата
-        )
-    )
+    user_data[callback.from_user.id] = {
+        "city": city_name,
+        "spec": specialization,
+        "index": 0
+    }
 
-    await callback.message.edit_text(
-        text=f"Вы выбрали:\nГород: {city_name}\nСпециальность: {specialization}\nВы уверены?",
-        reply_markup=builder.adjust(2).as_markup()
-    )
+    await send_university_info(callback, callback.from_user.id)
     await callback.answer()
-
 
 # Обработчик кнопки "Вернуться в начало"
 @router.callback_query(lambda c: c.data == "go_back_to_start")
@@ -147,22 +137,6 @@ async def go_back_to_start(callback: CallbackQuery):
     await process_start_command(callback.message)
     await callback.answer()
 
-
-@router.callback_query(ConfirmationCallbackFactory.filter())
-async def process_confirmation(callback: CallbackQuery, callback_data: ConfirmationCallbackFactory):
-    city_name = callback_data.city_name
-    specialization_name = callback_data.specialization_name
-
-    universities = vuz_data.get(city_name, {}).get(specialization_name, [])
-
-    if not universities:
-        await callback.message.edit_text("❌ Университеты не найдены по выбранной специальности.")
-        await callback.answer()
-        return
-
-    user_data[callback.from_user.id] = {"city": city_name, "spec": specialization_name, "index": 0}
-    await send_university_info(callback, callback.from_user.id)
-    await callback.answer()
 
 # Функция отправки информации об университете
 async def send_university_info(callback: CallbackQuery, user_id: int):
@@ -197,7 +171,7 @@ async def send_university_info(callback: CallbackQuery, user_id: int):
 
     # Добавляем сворачивающуюся цитату
     text += (
-        f"\n📝 <b>Дополнительно</b>: <blockquote>\n"
+        f"\n📝 <b>Дополнительно</b>: <blockquote expandable>\n"
         f"Общежитие: {university['options_check']['Общежитие']}\n"
         f"Государственный: {university['options_check']['Государственный']}\n"
         f"Воен. уч. центр: {university['options_check']['Воен. уч. центр']}\n"
@@ -209,14 +183,32 @@ async def send_university_info(callback: CallbackQuery, user_id: int):
     # Проверка наличия изображения
     image_url = university.get("image_url", "https://example.com/default.jpg")
 
-    # Кнопки навигации
-    builder = InlineKeyboardBuilder()
-    if index > 0:
-        builder.add(InlineKeyboardButton(text="⬅️ Предыдущий", callback_data="previous"))
-    if index < len(universities) - 1:
-        builder.add(InlineKeyboardButton(text="➡️ Следующий", callback_data="next"))
 
-    # Обновление сообщения
+    # Кнопки навигации и возврата
+    builder = InlineKeyboardBuilder()
+
+    # Навигационные кнопки
+    if len(universities) > 1:
+        if index > 0 and index < len(universities) - 1:
+            builder.row(
+                InlineKeyboardButton(text="⬅️ Предыдущий", callback_data="previous"),
+                InlineKeyboardButton(text="➡️ Следующий", callback_data="next")
+            )
+        elif index == 0:
+            builder.row(
+                InlineKeyboardButton(text="➡️ Следующий", callback_data="next")
+            )
+        elif index == len(universities) - 1:
+            builder.row(
+                InlineKeyboardButton(text="⬅️ Предыдущий", callback_data="previous")
+            )
+
+    # Постоянные кнопки смены
+    builder.row(
+        InlineKeyboardButton(text="🔄 Сменить специальность", callback_data="change_spec"),
+        InlineKeyboardButton(text="🏙️ Сменить город", callback_data="change_city")
+    )
+
     media = InputMediaPhoto(media=image_url, caption=text, parse_mode=ParseMode.HTML)
     await callback.message.edit_media(media, reply_markup=builder.as_markup())
 
@@ -244,4 +236,40 @@ async def navigate_universities(callback: CallbackQuery):
         user_data[user_id]["index"] += 1
 
     await send_university_info(callback, user_id)
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "change_spec")
+async def change_specialization(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    data = user_data.get(user_id)
+    if not data:
+        await callback.answer("Сначала выберите город и специальность", show_alert=True)
+        return
+
+    city_name = data["city"]
+    specializations = city_specializations.get(city_name, [])
+
+    builder = InlineKeyboardBuilder()
+    for idx, (spec_name, spec_count, _) in enumerate(specializations):
+        builder.add(
+            InlineKeyboardButton(
+                text=f"{spec_name} ({spec_count})",
+                callback_data=SpecializationSelectCallbackFactory(city_name=city_name, specialization_id=idx).pack()
+            )
+        )
+
+    # Удалим старое сообщение и отправим новое
+    await callback.message.delete()
+    await callback.message.answer(
+        text=f"Выберите новую специальность в городе {city_name}:",
+        reply_markup=builder.adjust(1).as_markup()
+    )
+    await callback.answer()
+
+
+
+@router.callback_query(lambda c: c.data == "change_city")
+async def change_city(callback: CallbackQuery):
+    await callback.message.delete()
+    await process_start_command(callback.message)
     await callback.answer()
